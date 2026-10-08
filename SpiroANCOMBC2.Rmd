@@ -1,0 +1,709 @@
+---
+title: "ANCOMN_Spiro"
+author: "Sterling Butler"
+date: "2025-03-31"
+output: html_document
+---
+```{R}
+library(ANCOMBC)
+library(tidyverse)
+library(phyloseq)
+library(qiime2R)
+library(DT)
+library(mia)
+```
+
+Set working directory for qiime2 processed data from RICA Project
+```{R}
+#set working directory
+setwd("/Users/sterlingbutler/Desktop/RICA_FILES_03262025")
+
+#import the feature table using the read_q2biom()
+asv<- read_q2biom("table.biom")
+
+#import the taxa file as a qiime2 artifact and then convert it into a usable tax table for phyloseq
+tax <- read_qza("taxonomy.qza")
+
+taxa <- tax$data %>% as_tibble() %>% 
+  separate(Taxon, sep=";", c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")) %>% 
+  select(-Confidence) %>% arrange(Feature.ID) %>% mutate(ASV = 1:n()) %>% 
+  mutate(newcol = "ASV") %>%
+  unite("ASVs", newcol:ASV)
+
+# fill in the empty cells with the Taxa table 
+fill_taxonomy <- function(row) {
+  last_known <- ""
+  for (i in 1:8) {  # Loop through taxonomy columns only
+    if (is.na(row[i]) || row[i] == "") {
+      row[i] <- paste0(last_known, "_unclassified")
+    } else {
+      last_known <- row[i]
+    }
+  }
+  return(row)
+}
+
+taxa <- as.data.frame(t(apply(taxa, 1, fill_taxonomy)), stringsAsFactors = FALSE)
+
+
+head(taxa)
+```
+
+Filter out taxa that blasted for chlorplast 
+```{R}
+taxa <- taxa %>% filter(ASVs!="ASV_729") %>% 
+  filter(ASVs!="ASV_1498") %>% 
+  filter(ASVs!="ASV_1175") %>% 
+  filter(ASVs!="ASV_1010") %>%
+  filter(ASVs!="ASV_1024") %>%
+  filter(ASVs!="ASV_546") %>%
+  filter(ASVs!="ASV_860") %>%
+  filter(ASVs!="ASV_1643") %>%
+  filter(ASVs!="ASV_1235")
+```
+
+Convert dataframes to be compatable for phyloseq
+```{R}
+#make the taxa table into a data frame 
+taxa<-as.data.frame(taxa)
+
+#import the meta data
+meta_df<-read.csv("qiime2_08022024_16S_RICA_META.csv")
+
+#make the correct column names for the phyloseq object 
+taxa1 = taxa %>% tibble::column_to_rownames("Feature.ID")
+meta = meta_df %>% tibble::column_to_rownames("sample")
+
+#convert the taxa table back into a matrix, so phyloseq can read
+tax_mat = as.matrix(taxa1)
+
+#make the individual phyloseq objects otu_table, tax_table, sample_data
+otu<-otu_table(asv, taxa_are_rows = TRUE)
+tax_table<-tax_table(tax_mat)
+sample<-sample_data(meta)
+
+```
+
+Lets make the phyloseq object (taxa, count, meta)
+```{R}
+#lets make that phyloseq object now
+phy= phyloseq(otu, tax_table, sample)
+
+#remove Mitochondria/ chloroplast
+phy <- phy %>% subset_taxa( Family!= "Mitochondria" | is.na(Family) & Class!="Chloroplast" | is.na(Class) ) 
+## Basic summary information for the phyloseq object that you just created
+#number of taxa
+ntaxa(phy)
+#number of samples
+nsamples(phy)
+#number of variables
+sample_variables(phy)
+
+```
+
+Filtering out the Non templete controls and samples that had low reads 
+Then filtering of transcent bacteria taxa 
+```{R}
+#remove NTC and a sample with 20 total reads 
+#phy <-phy %>% subset_samples(Species!="NA")
+phy <-phy %>% subset_samples(Bag_Number!="32")
+
+#filter out the noise in the data, this filters out any taxa that have counts less than 5
+#phy_fill= filter_taxa(phy , function(x) sum(x > 5) > (0.05*length(x)), TRUE)
+
+phy_fill= filter_taxa(phy , function(x) sum(x > 2) > (0.03*length(x)), TRUE)
+
+## Basic summary information for the phyloseq object that you just created
+#number of taxa
+ntaxa(phy_fill)
+#number of samples
+nsamples(phy_fill)
+#number of variables
+sample_variables(phy_fill)
+```
+
+Determining if a spirochetacea is present in a genotype group 
+```{R}
+ancom_spiro = mia::makeTreeSummarizedExperimentFromPhyloseq(phy_fill)
+print(ancom_spiro)
+
+set.seed(123)
+
+output = ancombc2(
+  data = ancom_spiro,
+  assay_name = "counts",
+  tax_level = NULL,
+  fix_formula = "a_Genotype",
+  rand_formula = NULL,
+  p_adj_method = "holm",
+  pseudo_sens = TRUE,
+  prv_cut = 0.05,
+  lib_cut = 0,
+  s0_perc = 0.05,
+  group = "a_Genotype",
+  struc_zero = TRUE,
+  neg_lb = FALSE,
+  alpha = 0.01,
+  n_cl = 2,
+  verbose = TRUE,
+  global = FALSE,  # Deactivated due to <3 categories
+  pairwise = FALSE,  # Deactivated due to <3 categories
+  dunnet = FALSE,  # Deactivated due to <3 categories
+  trend = FALSE,  # Deactivated due to <3 categories
+  iter_control = list(
+    tol = 1e-2,
+    max_iter = 20,
+    verbose = TRUE),
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100),
+  lme_control = lme4::lmerControl(),
+  mdfdr_control = list(
+    fwer_ctrl_method = "holm",
+    B = 100))
+
+#output of results 
+res_prim = output$res
+
+
+```
+
+
+Getting the Spirochaetaceae presence absence between genotypes 
+```{R}
+
+present <- output$zero_ind
+
+#spiro asv 1
+present_filtered_3aa <- present %>%
+  filter(taxon == "3aa965194c47dee2ebb9ad04c942930a" )  
+present_filtered_3aa
+
+```
+Make Sure Meta data and ancom results line up for Spirochaetaceae presence absence between genotypes
+yes and no are reversed 
+```{R}
+
+meta %>% select(structural_zero_spiro, a_Genotype)
+
+
+```
+
+
+target_taxa <- taxa_names(subset_taxa(phy_fill, Order == " o__Spirochaetales"))
+
+# Get the abundance matrix
+otu_mat <- otu_table(phy_fill)
+
+# Ensure correct orientation: taxa are rows
+if (!taxa_are_rows(phy_fill)) { otu_mat <- t(otu_mat)}
+
+# Find samples where this taxon has non-zero abundance
+
+samples_with_target_no <- colnames(otu_mat)[otu_mat[target_taxa, ] < 5]
+phy_spiro_yes <- prune_samples(!(sample_names(phy_fill) %in% samples_with_target_no), phy_fill)
+
+
+samples_with_target_yes <- colnames(otu_mat)[otu_mat[target_taxa, ] > 5]
+phy_spiro_no <- prune_samples(!(sample_names(phy_fill) %in% samples_with_target_yes), phy_fill)
+
+
+```{R}
+
+phy_spiro_yes <- subset_samples(phy_fill, a_Genotype %in% c("Acerv-1", "Acerv-2",  "Cooper's", "Elkhorn", "KJS-74", "Marker 9", "MB B",  "SI F",  "Steph's B4", "Steph's C6", "Thicket-3"))
+
+phy_spiro_no <- subset_samples(phy_fill, a_Genotype %in% c("Acerv-3", "Cheetos A","Cheetos D", "Kaufman-1", "Kelsey's 1", "SI A", "SI C", "Sandy","Stag C", "SI D", "TJ 2", "SR A"))
+
+supp.labs <- c("Baseline Conditions", "Elevated Temperature")
+names(supp.labs) <- c("T1", "T2")
+
+
+```
+
+#filter into two groups 
+#spirochaetaceae yes 
+#phy_spiro_yes <-phy %>% subset_samples(Spirochaetaceae_ANCOMpres=="YES")
+#nsamples(phy_spiro_yes)
+
+#spirochaetaceae no 
+#phy_spiro_no <-phy %>% subset_samples(Spirochaetaceae_ANCOMpres=="NO")
+#nsamples(phy_spiro_no)
+
+
+Spiro Present figure 
+
+OLD ANCOMNBC method 
+#make into treesummarized fromat for ancom function
+
+rica_ancom_spiro_yes = mia::makeTreeSummarizedExperimentFromPhyloseq(phy_spiro_yes)
+print(rica_ancom_spiro_yes)
+
+set.seed(123)
+
+output_yes = ancombc2(
+  data = rica_ancom_spiro_yes,
+  assay_name = "counts",
+  tax_level = NULL,
+  fix_formula = "Time_Point",
+  rand_formula = NULL,
+  p_adj_method = "holm",
+  pseudo_sens = TRUE,
+  prv_cut = 0.10,
+  lib_cut = 0,  #maybe change to zero, mess with it 
+  s0_perc = 0.05,
+  group = "Time_Point",
+  struc_zero = TRUE,
+  neg_lb = TRUE,
+  alpha = 0.05,
+  n_cl = 2,
+  verbose = TRUE,
+  global = FALSE,  # Deactivated due to <3 categories
+  pairwise = FALSE,  # Deactivated due to <3 categories
+  dunnet = FALSE,  # Deactivated due to <3 categories
+  trend = FALSE,  # Deactivated due to <3 categories
+  iter_control = list(
+    tol = 1e-2,
+    max_iter = 20,
+    verbose = TRUE),
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100),
+  lme_control = lme4::lmerControl(),
+  mdfdr_control = list(
+    fwer_ctrl_method = "holm",
+    B = 100))
+
+res_prim_yes = output_yes$res
+
+
+NEW ANCOMBC Method 
+```{R}
+
+
+output_no = ancombc2(data = phy_spiro_no , tax_level = "ASVs",
+                  fix_formula = "Time_Point", rand_formula = NULL,
+                  p_adj_method = "holm", pseudo_sens = TRUE,
+                  prv_cut = 0, lib_cut = 0, s0_perc = 0.05,
+                  group = "Time_Point", struc_zero = TRUE, neg_lb = TRUE)
+res_prim_no = output_no$res
+
+```
+
+```{R}
+
+taxa_df = tax_table(phy_spiro_no) %>% as.data.frame() %>% rownames_to_column("taxon")
+head(taxa_df)
+dim(taxa_df)
+
+df_fig_no <- dplyr::left_join(res_prim_no, taxa_df, by = "taxon")
+dim(df_fig_no)
+head(df_fig_no)
+
+```
+```{R}
+sort(df_fig_no$lfc_Time_PointT2)
+```
+
+```{R}
+
+taxa_fil= df_fig_no %>% column_to_rownames("taxon")%>%
+as.matrix
+
+
+phy_no =phyloseq(otu_table(asv, taxa_are_rows=TRUE), 
+               sample_data(meta),
+              tax_table(taxa_fil))
+
+phy_no = subset_samples(phy_no, a_Genotype %in% c("Acerv-3", "Cheetos A","Cheetos D", "Kaufman-1", "Kelsey's 1", "SI A", "SI C", "Sandy","Stag C", "SI D", "TJ 2", "SR A"))
+
+```
+
+
+```{R}
+no_melt = phy_no  %>%  
+  #tax_glom("Genus") %>% 
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% 
+  psmelt()   
+
+```
+```{R}
+ bubble_no <- no_melt %>%
+  
+  as.data.frame() %>%
+  mutate(
+    Abundance = as.numeric(as.character(Abundance)),
+    lfc_Time_PointT2 = as.numeric(str_trim(as.character(lfc_Time_PointT2)))
+  ) %>%
+  filter(
+    passed_ss_Time_PointT2 == "TRUE",
+    Abundance > 0) %>%
+  mutate(
+    Enriched = ifelse(lfc_Time_PointT2 < 0, "T1", "T2")
+  ) %>%
+  { print(table(.$Enriched)); . } %>%  
+  filter(!str_detect(Phylum, "k__Bacteria_unclassified")) %>%
+   
+  
+  # Debug check
+
+  #  string replacements 
+mutate(across(where(is.character), ~ str_replace_all(.x, "o__", ""))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "c__", ""))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "p__", ""))) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "ASV_", ""))) %>%
+   mutate(across(where(is.character), ~ str_replace_all(.x, "_unclassified", " (UO)"))) %>%
+
+ggplot(aes(x = a_Genotype, y = reorder(ASVs, lfc_Time_PointT2))) +
+  geom_point(aes(size = Abundance, color = Enriched)) +
+  scale_size_continuous(range = c(0.1, 5),
+                        breaks = c(0.01, 0.20, 0.5, 0.80)) +
+  scale_color_manual(values = c("T1" = "#3399CC", "T2" = "#990000"))+
+  facet_grid(Order~Time_Point, space = "free", scales = "free", switch = "y",
+              labeller = labeller(Time_Point = supp.labs)) +
+  theme_bw() +
+  theme(
+     axis.title.x = element_text(size = 0),
+    axis.title.y = element_text(size = 10),
+    axis.text.x = element_text(size = 6, angle = 90),
+    axis.text.y = element_text(size = 6),
+    strip.text.y = element_text(size = 6),
+    strip.text.y.left = element_text(angle = 0),
+    strip.text.x = element_text(size=6),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6)
+  ) +
+  ylab("ASV and Order") +
+ # ggtitle("Spirochaetaceae Not Present Differential Abundance") +
+ theme(panel.spacing.x=unit(0.0, "lines"),panel.spacing.y=unit(0.0, "lines"))
+
+bubble_no
+```
+```{R}
+supp.labs2 <- c("BC", "Elevated Temperature")
+names(supp.labs2) <- c("T1", "T2")
+
+F1 <- df_fig_no %>%
+ filter(passed_ss_Time_PointT2== "TRUE") %>%
+  mutate_if(is.character, str_replace_all, pattern = "o__", replacement = "") %>%
+ 
+  mutate(
+    direction = ifelse(lfc_Time_PointT2 < 0, "T1", "T2"),
+    direction = factor(direction, levels = c("T1", "T2"))
+  ) %>%
+  mutate(sig_star = case_when(p_Time_PointT2 <=0.05 ~"*")) %>%
+   filter(!str_detect(Phylum, "k__Bacteria_unclassified")) %>%
+  
+  ggplot(aes(x = reorder(ASVs, lfc_Time_PointT2), y = lfc_Time_PointT2, fill = direction)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_errorbar(aes(ymin = lfc_Time_PointT2 - se_Time_PointT2, ymax = lfc_Time_PointT2 + se_Time_PointT2)) +
+  geom_text(aes(label = sig_star), hjust = -1, size = 6)+
+  coord_flip() +
+  labs(
+    x = "ASVs",
+    y = "LFC",
+    fill = "Direction"
+  ) +
+  scale_fill_manual(values = c("T1" = "#3399CC", "T2" = "#990000")) +
+  facet_grid(Order ~ direction, space = "free", scales = "free", switch = "y",
+              labeller = labeller(direction = supp.labs2)) +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 18, color = "white"),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 6, angle = 90),
+    axis.text.y = element_blank(),
+    strip.text.x = element_text(size = 6),
+    strip.text.y = element_blank(),
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 5),
+    legend.position = "none",
+    panel.spacing.x = unit(0.0, "lines"),
+    panel.spacing.y = unit(0.0, "lines")
+  )
+
+F1
+
+```
+
+
+```{R}
+ggpubr::ggarrange(bubble_no, F1,common.legend = TRUE, legend = "top",
+                   widths=c(2,1))
+```
+
+
+
+
+
+OLD LFC Figure 
+
+#filter out the significant results 
+df_fig__lf = df_fig_yes %>%
+ dplyr::filter(p_Time_PointT2 < 0.05) %>% 
+ dplyr::arrange(desc(lfc_Time_PointT2)) %>%
+  dplyr::mutate(direct = ifelse(lfc_Time_PointT2 > 0, "Positive LFC", "Negative LFC"),
+              color = ifelse(passed_ss_Time_PointT2 == "TRUE",  "blue", "red"))
+
+#df_fig_yes_lf$taxon = factor(df_fig_yes_lf$taxon, levels = df_fig_yes_lf$taxon)
+
+lfc_yes <- df_fig_yes_lf %>% ggplot(aes(x = Order, y = lfc_Time_PointT2, fill = direct )) + 
+  geom_bar(stat = "identity", width = 0.7, colour = "black", 
+           position = position_dodge(width = 0.4))+
+  geom_errorbar(aes(ymin = lfc_Time_PointT2 - se_Time_PointT2, ymax = lfc_Time_PointT2 + se_Time_PointT2), 
+                width = 0.2, position = position_dodge(0.05), color = "black")+
+  theme(axis.text.x = element_text( vjust=.5, hjust=1, size=8),
+        axis.title.y = element_text(size=8),
+        axis.title.x = element_text(size=8),
+        legend.text = element_text(size = 8),
+        title = element_text(size = 8),
+        axis.text.y = element_text( size=5, color = df_fig_yes_lf$color))+
+  labs(y="Log Fold Change", color="Log Fold Change", x="Taxa", title = "Log Fold Change from T1 to T2 Spiro Postive Genotypes")+
+  coord_flip()
+lfc_yes
+
+
+Spiro Not Present figure 
+
+
+rica_ancom_spiro_no = mia::makeTreeSummarizedExperimentFromPhyloseq(phy_spiro_no)
+print(rica_ancom_spiro_no)
+
+set.seed(123)
+
+output_no = ancombc2(
+  data = rica_ancom_spiro_no,
+  assay_name = "counts",
+  tax_level = NULL,
+  fix_formula = "Time_Point",
+  rand_formula = NULL,
+  p_adj_method = "holm",
+  pseudo_sens = TRUE,
+  prv_cut = 0.10,
+  lib_cut = 0,
+  s0_perc = 0.05,
+  group = "Time_Point",
+  struc_zero = TRUE,
+  neg_lb = TRUE,
+  alpha = 0.05,
+  n_cl = 2,
+  verbose = TRUE,
+  global = FALSE,  # Deactivated due to <3 categories
+  pairwise = FALSE,  # Deactivated due to <3 categories
+  dunnet = FALSE,  # Deactivated due to <3 categories
+  trend = FALSE,  # Deactivated due to <3 categories
+  iter_control = list(
+    tol = 1e-2,
+    max_iter = 20,
+    verbose = TRUE),
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100),
+  lme_control = lme4::lmerControl(),
+  mdfdr_control = list(
+    fwer_ctrl_method = "holm",
+    B = 100))
+
+
+res_prim_no = output_no$res
+
+```{R}
+
+
+output_yes = ancombc2(data = phy_spiro_yes , tax_level = "ASVs",
+                  fix_formula = "Time_Point", rand_formula = NULL,
+                  p_adj_method = "holm", pseudo_sens = TRUE,
+                  prv_cut = 0, lib_cut = 0, s0_perc = 0.05,
+                  group = "Time_Point", struc_zero = TRUE, neg_lb = TRUE)
+
+res_prim_yes = output_yes$res
+
+```
+
+
+```{R}
+taxa_df_yes = tax_table(phy_spiro_yes) %>% as.data.frame() %>% rownames_to_column("taxon")
+head(taxa_df_yes)
+dim(taxa_df_yes)
+
+df_fig_yes <- dplyr::left_join(res_prim_yes, taxa_df, by = "taxon")
+dim(df_fig_yes)
+head(df_fig_yes)
+
+```
+
+
+```{R}
+
+sort(df_fig_yes$lfc_Time_PointT2)
+
+```
+
+```{R}
+taxa_fil_yes= df_fig_yes %>% column_to_rownames("taxon")%>%
+as.matrix
+
+
+phy_yes =phyloseq(otu_table(asv, taxa_are_rows=TRUE), 
+               sample_data(meta),
+              tax_table(taxa_fil_yes))
+
+phy_yes = subset_samples(phy_yes, a_Genotype %in% c("Acerv-1", "Acerv-2",  "Cooper's", "Elkhorn", "KJS-74", "Marker 9", "MB B",  "SI F",  "Steph's B4", "Steph's C6", "Thicket-3"))
+
+```
+
+
+```{R}
+yes_melt = phy_yes  %>%  
+  #tax_glom("Genus") %>% 
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% 
+  psmelt()   
+
+```
+
+
+```{R}
+
+bubble_yes <- yes_melt %>%
+  as.data.frame() %>%
+  mutate(
+    Abundance = as.numeric(as.character(Abundance)),
+    lfc_Time_PointT2 = as.numeric(str_trim(as.character(lfc_Time_PointT2)))
+  ) %>%
+  filter(
+    passed_ss_Time_PointT2 == "TRUE",
+    Abundance > 0) %>%
+  mutate(
+    Enriched = ifelse(lfc_Time_PointT2 < 0, "T1", "T2")
+  ) %>%
+  filter(Phylum !="k__Bacteria_unclassified")%>%
+  { print(table(.$Enriched)); . } %>%  # Debug check
+
+  #  string replacements 
+mutate(across(where(is.character), ~ str_replace_all(.x, "o__", ""))) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "ASV_", ""))) %>%
+
+
+ggplot(aes(x = a_Genotype, y = reorder(ASVs, lfc_Time_PointT2))) +
+  geom_point(aes(size = Abundance, color = Enriched)) +
+  scale_size_continuous(range = c(0.1, 7),
+                        breaks = c(0.01, 0.20, 0.5, 0.80)) +
+  scale_color_manual(values = c("T1" = "#3399CC", "T2" = "#990000")) +
+  facet_grid(Order~Time_Point, space = "free", scales = "free", switch = "y",
+              labeller = labeller(Time_Point = supp.labs)) +
+  theme_bw() +
+  theme(
+     axis.title.x = element_text(size = 0),
+    axis.title.y = element_text(size = 10),
+    axis.text.x = element_text(size = 6, angle = 90),
+    axis.text.y = element_text(size = 6),
+    strip.text.y = element_text(size = 6),
+    strip.text.y.left = element_text(angle = 0),
+    strip.text.x = element_text(size=6),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6)
+  ) +
+  ylab("ASV and Order") +
+  #ggtitle("Spirochaetaceae Present Differential Abundance") +
+ theme(panel.spacing.x=unit(0.0, "lines"),panel.spacing.y=unit(0.0, "lines"))
+
+bubble_yes
+
+```
+
+
+
+df_fig_yes_lf = df_fig_yes %>%
+  dplyr::filter(p_Time_PointT2 < 0.05) %>% 
+  dplyr::arrange(desc(lfc_Time_PointT2)) %>%
+  dplyr::mutate(direct = ifelse(lfc_Time_PointT2 > 0, "Positive LFC", "Negative LFC"),
+                color = ifelse(passed_ss_Time_PointT2 == 1,  "blue", "red"))
+
+#df_fig_no <- df_fig_no[order(df_fig_no$lfc_Time_PointT2),]
+#colnames(taxa)[1]<- "taxon"
+#df_fig_no <- left_join(df_fig_no, taxa, by="taxon")
+
+#df_fig_no$taxon = factor(df_fig_no$taxon, levels = df_fig_no$taxon)
+
+lfc_16 <- df_fig_yes_lf %>% ggplot(aes(x = Order, y = lfc_Time_PointT2, fill = direct)) + 
+  geom_bar(stat = "identity", width = 0.7, color = "black", 
+           position = position_dodge(width = 0.4))+
+  geom_errorbar(aes(ymin = lfc_Time_PointT2 - se_Time_PointT2, ymax = lfc_Time_PointT2 + se_Time_PointT2), 
+                width = 0.2, position = position_dodge(0.05), color = "black")+
+  theme(axis.text.x = element_text(angle=90, vjust=.5, hjust=1, size=8),
+        axis.title.y = element_text(size=8),
+        axis.title.x = element_text(size=8),
+        legend.text = element_text(size = 8),
+        title = element_text(size = 8),
+        axis.text.y = element_text( size=5, color = df_fig_no$color))+
+  labs(y="Log Fold Change", color="Log Fold Change", x="Taxa", title = "Log Fold Change from T1 to T2 For Spiro Negative Genotypes")+
+  coord_flip()
+
+lfc_16
+
+```{R}
+
+F2 <- df_fig_yes %>%
+ filter(passed_ss_Time_PointT2== "TRUE") %>%
+  mutate_if(is.character, str_replace_all, pattern = "o__", replacement = "") %>%
+ 
+  mutate(
+    direction = ifelse(lfc_Time_PointT2 < 0, "T1", "T2"),
+    direction = factor(direction, levels = c("T1", "T2"))
+  ) %>%
+  mutate(sig_star = case_when(p_Time_PointT2 <=0.05 ~"*")) %>%
+  filter(Phylum !="k__Bacteria_unclassified")%>%
+  ggplot(aes(x = reorder(ASVs, lfc_Time_PointT2), y = lfc_Time_PointT2, fill = direction)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = sig_star), hjust = -1, size = 6)+
+  geom_errorbar(aes(ymin = lfc_Time_PointT2 - se_Time_PointT2, ymax = lfc_Time_PointT2 + se_Time_PointT2)) +
+  coord_flip() +
+  labs(
+    x = "ASVs",
+    y = "LFC",
+    fill = "Direction"
+  ) +
+  scale_fill_manual(values = c("T1" = "#3399CC", "T2" = "#990000")) +
+  facet_grid(Order ~ direction, space = "free", scales = "free", switch = "y",
+              labeller = labeller(direction = supp.labs2))+
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 22, color = "white"),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 6, angle = 90),
+    axis.text.y = element_blank(),
+    strip.text.x = element_text(size = 6),
+    strip.text.y = element_blank(),
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 5),
+    legend.position = "none",
+    panel.spacing.x = unit(0.0, "lines"),
+    panel.spacing.y = unit(0.0, "lines")
+  )
+F2
+
+```
+
+```{R}
+ggpubr::ggarrange(bubble_yes, F2,common.legend = TRUE, legend = "top",
+                   widths=c(2,1)
+                  )
+
+ggpubr::ggarrange(bubble_no, F1,common.legend = TRUE, legend = "top",
+                   widths=c(2,1)
+                  )
+                 
+```
+```{r}
+ggpubr::ggarrange(bubble_yes, F2,common.legend = TRUE, legend = "top",
+                   widths=c(2,1)
+                  )
+ggsave("ancombc_spiro_yes.png", width = 7, height = 5)
+
+```
+```{r}
+ggpubr::ggarrange(bubble_no, F1,common.legend = TRUE, legend = "top",
+                   widths=c(2,1)
+                  )
+ggsave("ancombc_spiro_no.png", width = 7, height = 5)
+
+```

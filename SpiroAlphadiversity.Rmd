@@ -1,0 +1,341 @@
+---
+title: "SpiroAlpha"
+author: "Sterling Butler"
+date: "2025-05-07"
+output: html_document
+---
+
+```{R}
+library(ANCOMBC)
+library(tidyverse)
+library(phyloseq)
+library(qiime2R)
+library(DT)
+library(mia)
+library(vegan)
+```
+
+
+```{R}
+#set working directory
+setwd("/Users/sterlingbutler/Desktop/RICA_FILES_03262025")
+
+#import the feature table using the read_q2biom()
+asv<- read_q2biom("table.biom")
+
+#import the taxa file as a qiime2 artifact and then convert it into a usable tax table for phyloseq
+tax <- read_qza("taxonomy.qza")
+
+taxa <- tax$data %>% as_tibble() %>% 
+  separate(Taxon, sep=";", c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")) %>% 
+  select(-Confidence) %>% arrange(Feature.ID) %>% mutate(ASV = 1:n()) %>% 
+  mutate(newcol = "ASV") %>%
+  unite("ASVs", newcol:ASV)
+
+# fill in the empty cells with the Taxa table 
+fill_taxonomy <- function(row) {
+  last_known <- ""
+  for (i in 1:8) {  # Loop through taxonomy columns only
+    if (is.na(row[i]) || row[i] == "") {
+      row[i] <- paste0(last_known, "_unclassified")
+    } else {
+      last_known <- row[i]
+    }
+  }
+  return(row)
+}
+
+taxa <- as.data.frame(t(apply(taxa, 1, fill_taxonomy)), stringsAsFactors = FALSE)
+
+
+head(taxa)
+```
+
+
+```{R}
+
+taxa <- taxa %>% filter(ASVs!="ASV_729") %>% 
+  filter(ASVs!="ASV_1498") %>% 
+  filter(ASVs!="ASV_1175") %>% 
+  filter(ASVs!="ASV_1010") %>%
+  filter(ASVs!="ASV_1024") %>%
+  filter(ASVs!="ASV_546") %>%
+  filter(ASVs!="ASV_860") %>%
+  filter(ASVs!="ASV_1643") %>%
+  filter(ASVs!="ASV_1235")
+```
+
+Convert dataframes to be compatable for phyloseq
+```{R}
+#make the taxa table into a data frame 
+taxa<-as.data.frame(taxa)
+
+#import the meta data
+meta_df<-read.csv("qiime2_08022024_16S_RICA_META.csv")
+
+#make the correct column names for the phyloseq object 
+taxa1 = taxa %>% tibble::column_to_rownames("Feature.ID")
+meta = meta_df %>% tibble::column_to_rownames("sample")
+
+#convert the taxa table back into a matrix, so phyloseq can read
+tax_mat = as.matrix(taxa1)
+
+#make the individual phyloseq objects otu_table, tax_table, sample_data
+otu<-otu_table(asv, taxa_are_rows = TRUE)
+tax_table<-tax_table(tax_mat)
+sample<-sample_data(meta)
+
+```
+
+Lets make the phyloseq object (taxa, count, meta)
+```{R}
+
+#lets make that phyloseq object now
+phy= phyloseq(otu, tax_table, sample)
+
+#remove Mitochondria/ chloroplast
+phy <- phy %>% subset_taxa( Family!= "Mitochondria" | is.na(Family) & Class!="Chloroplast" | is.na(Class) ) 
+## Basic summary information for the phyloseq object that you just created
+#number of taxa
+ntaxa(phy)
+#number of samples
+nsamples(phy)
+#number of variables
+sample_variables(phy)
+
+
+#remove NTC and a sample with 20 total reads 
+phy <-phy %>% subset_samples(Species!="NA")
+phy <-phy %>% subset_samples(Bag_Number!="32")
+
+#taking out the zeros in the data 
+phy= filter_taxa(phy, function(x) sum(x > 0) > (0.00*length(x)), TRUE)
+
+```
+```{r}
+
+ps_rare_t1 <- phy %>% subset_samples(Time_Point=="T1") 
+
+# Step 1: Extract the OTU/ASV table
+otu_mat_t1 <- otu_table(ps_rare_t1)
+
+# Step 2: Sum reads per sample
+# If taxa are rows, transpose first
+if (taxa_are_rows(otu_mat_t1)) {
+  sample_sums_t1 <- colSums(otu_mat_t1)
+} else {
+  sample_sums_t1 <- rowSums(otu_mat_t1)
+}
+
+# Step 3: Find the minimum read depth
+min(sample_sums_t1)
+
+```
+
+input the lowest sample reads into rarefy sample.size
+```{r}
+ps_rare_t1 <- phyloseq::rarefy_even_depth(ps_rare_t1, rngseed = 123, replace = FALSE, sample.size=37548)
+```
+
+
+```{R}
+
+#if you want to show what is significant and then what you want to compare
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+comparisons_material = list( c("SP", "SNP"))
+
+ NC <- ps_rare_t1 %>%
+  plot_richness( x="structural_zero_spiro", color = "structural_zero_spiro", measures=c("Chao1", "Shannon", "Simpson"))+
+  geom_boxplot(alpha=0.2)+
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = comparisons_material, paired = TRUE, label = "p.signif", symnum.args = symnum.args)+
+   labs(
+    x = "",
+    title = "Baseline Conditions",
+    colour= "Spirochaetaceae Structural Zero")+ 
+  theme_classic2()+
+  scale_color_manual(values = c( "black", "green"))
+
+NC
+```
+```{r}
+
+ps_rare_t2 <- phy %>% subset_samples(Time_Point=="T2") 
+
+# Step 1: Extract the OTU/ASV table
+otu_mat_t2 <- otu_table(ps_rare_t2)
+
+# Step 2: Sum reads per sample
+# If taxa are rows, transpose first
+if (taxa_are_rows(otu_mat_t2)) {
+  sample_sums_t2 <- colSums(otu_mat_t2)
+} else {
+  sample_sums_t2 <- rowSums(otu_mat_t2)
+}
+
+# Step 3: Find the minimum read depth
+min(sample_sums_t2)
+
+```
+
+input the lowest sample reads into rarefy sample.size
+```{r}
+ps_rare_t2 <- phyloseq::rarefy_even_depth(ps_rare_t2, rngseed = 123, replace = FALSE, sample.size=66587)
+```
+
+```{R}
+
+#if you want to show what is significant and then what you want to compare
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+comparisons_material = list( c("SNP", "SP"))
+
+TC <- ps_rare_t2 %>%
+  plot_richness( x="structural_zero_spiro", color = "structural_zero_spiro", measures=c("Chao1", "Shannon", "Simpson"))+
+  geom_boxplot(alpha=0.2)+
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = comparisons_material, label = "p.signif", symnum.args = symnum.args)+ 
+  labs(x = "",
+    title = "Elevated Temperature",
+    colour= "Spirochaetaceae Structural Zero")+
+  theme_classic2()+
+  theme(strip.background = element_blank(), strip.text = element_blank())+ 
+  scale_color_manual(values = c( "black", "green"))
+
+
+TC
+```
+```{r}
+
+ps_rare_yes <- phy %>% subset_samples(structural_zero_spiro=="SP") 
+
+# Step 1: Extract the OTU/ASV table
+otu_mat_yes <- otu_table(ps_rare_yes)
+
+# Step 2: Sum reads per sample
+# If taxa are rows, transpose first
+if (taxa_are_rows(otu_mat_yes)) {
+  sample_sums_yes <- colSums(otu_mat_yes)
+} else {
+  sample_sums_yes <- rowSums(otu_mat_yes)
+}
+
+# Step 3: Find the minimum read depth
+min(sample_sums_yes)
+
+```
+
+input the lowest sample reads into rarefy sample.size
+```{r}
+ps_rare_yes <- phyloseq::rarefy_even_depth(ps_rare_yes, rngseed = 123, replace = FALSE, sample.size=37548)
+```
+
+
+
+```{R}
+
+
+#if you want to show what is significant and then what you want to compare
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+comparisons_material = list( c("T1", "T2"))
+
+SNP <- ps_rare_yes %>%
+  plot_richness( x="Time_Point", color = "structural_zero_spiro", measures=c("Chao1", "Shannon", "Simpson"))+
+  geom_boxplot(alpha=0.2)+
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = comparisons_material, label = "p.signif", symnum.args = symnum.args)+ 
+  labs(
+   x = "",
+   title = "Spiro-Absent Genotypes",
+    colour= "Spirochaetaceae Structural Zero",
+   y="")+
+  theme_classic2()+
+  scale_color_manual(values = c("black","green"))
+
+SNP
+```
+```{r}
+
+ps_rare_no <- phy %>% subset_samples(structural_zero_spiro=="SNP") 
+
+# Step 1: Extract the OTU/ASV table
+otu_mat_no <- otu_table(ps_rare_no)
+
+# Step 2: Sum reads per sample
+# If taxa are rows, transpose first
+if (taxa_are_rows(otu_mat_no)) {
+  sample_sums_no <- colSums(otu_mat_no)
+} else {
+  sample_sums_no <- rowSums(otu_mat_no)
+}
+
+# Step 3: Find the minimum read depth
+min(sample_sums_no)
+
+```
+
+input the lowest sample reads into rarefy sample.size
+```{r}
+ps_rare_no <- phyloseq::rarefy_even_depth(ps_rare_no, rngseed = 123, replace = FALSE, sample.size=43674)
+```
+
+```{R}
+
+
+#if you want to show what is significant and then what you want to compare
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+comparisons_material = list( c("T1", "T2"))
+
+SP <- ps_rare_no %>%
+  plot_richness( x="Time_Point", color = "structural_zero_spiro", measures=c( "Chao1", "Shannon", "Simpson"))+
+  geom_boxplot(alpha=0.2)+
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = comparisons_material, label = "p.signif", symnum.args = symnum.args)+ 
+  labs(x = "",
+   title = "Spiro-Present Genotypes",
+    colour= "Spirochaetaceae Structural Zero",
+   y="")+
+  theme_classic2()+
+  theme(strip.background = element_blank(), strip.text = element_blank())+
+  scale_color_manual(values = c( "green"))
+
+SP 
+```
+
+
+
+```{R}
+
+alpha_spiro <- ggpubr::ggarrange(NC, SNP, TC, SP, common.legend = TRUE, legend = "top"  )
+
+ggsave("alpha_spiro_NewMethod.png", width = 10, height = 10.5)
+
+alpha_spiro
+
+```
+```{r}
+ps_rare_all <- phyloseq::rarefy_even_depth(phy, rngseed = 123, replace = FALSE, sample.size=30000)
+```
+
+```{r}
+
+#if you want to show what is significant and then what you want to compare
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+comparisons_material = list( c("Yes", "No"))
+
+choas <- ps_rare_all %>%
+  plot_richness( x="structural_zero_spiro", color = "structural_zero_spiro", measures="Chao1")+
+  geom_boxplot(alpha=0.2)+
+  facet_wrap(.~Time_Point)+
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = comparisons_material, label = "p.signif", symnum.args = symnum.args)+ 
+  labs(
+   x = "",
+   title = "Non-Spiro-Associated Genotypes",
+    colour= "Spirochaetaceae Structural Zero",
+   y="")+
+  theme_classic2()+
+  scale_color_manual(values = c(  "black","green"))
+
+choas
+
+```

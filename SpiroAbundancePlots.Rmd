@@ -1,0 +1,272 @@
+---
+title: "SpiroRelativeAbundance"
+author: "Sterling Butler"
+date: "2025-05-08"
+output: html_document
+---
+
+
+```{R}
+library(ANCOMBC)
+library(tidyverse)
+library(phyloseq)
+library(qiime2R)
+library(DT)
+library(mia)
+```
+
+Lets get the data 
+```{R}
+#set working directory
+setwd("/Users/sterlingbutler/Desktop/RICA_FILES_03262025")
+
+#import the feature table using the read_q2biom()
+asv<- read_q2biom("table.biom")
+
+#import the taxa file as a qiime2 artifact and then convert it into a usable tax table for phyloseq
+tax <- read_qza("taxonomy.qza")
+
+taxa <- tax$data %>% as_tibble() %>% 
+  separate(Taxon, sep=";", c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")) %>% 
+  select(-Confidence) %>% arrange(Feature.ID) %>% mutate(ASV = 1:n()) %>% 
+  mutate(newcol = "ASV") %>%
+  unite("ASVs", newcol:ASV)
+
+#fixing the taxa table by replacing NAs cells with lowest assigned taxa 
+# fill in the empty cells with the Taxa table 
+fill_taxonomy <- function(row) {
+  last_known <- ""
+  for (i in 1:8) {  # Loop through taxonomy columns only
+    if (is.na(row[i]) || row[i] == "") {
+      row[i] <- paste0(last_known, "_unclassified")
+    } else {
+      last_known <- row[i]
+    }
+  }
+  return(row)
+}
+
+taxa <- as.data.frame(t(apply(taxa, 1, fill_taxonomy)), stringsAsFactors = FALSE)
+
+
+head(taxa)
+```
+
+Filtering out likely chloroplast reads, blasted qiime2 output seq for each of these ASVs 
+```{R}
+
+taxa <- taxa %>% filter(ASVs!="ASV_729") %>% 
+  filter(ASVs!="ASV_1498") %>% 
+  filter(ASVs!="ASV_1175") %>% 
+  filter(ASVs!="ASV_1010") %>%
+  filter(ASVs!="ASV_1024") %>%
+  filter(ASVs!="ASV_546") %>%
+  filter(ASVs!="ASV_860") %>%
+  filter(ASVs!="ASV_1643") %>%
+  filter(ASVs!="ASV_1235")
+```
+
+Convert dataframes to be compatable for phyloseq
+```{R}
+#make the taxa table into a data frame 
+taxa<-as.data.frame(taxa)
+
+#import the meta data
+meta_df<-read.csv("qiime2_08022024_16S_RICA_META.csv")
+
+#make the correct column names for the phyloseq object 
+taxa1 = taxa %>% tibble::column_to_rownames("Feature.ID")
+meta = meta_df %>% tibble::column_to_rownames("sample")
+
+#convert the taxa table back into a matrix, so phyloseq can read
+tax_mat = as.matrix(taxa1)
+
+#make the individual phyloseq objects otu_table, tax_table, sample_data
+otu<-otu_table(asv, taxa_are_rows = TRUE)
+tax_table<-tax_table(tax_mat)
+sample<-sample_data(meta)
+
+```
+
+Lets make the phyloseq object (taxa, count, meta)
+```{R}
+#lets make that phyloseq object now
+phy= phyloseq(otu, tax_table, sample)
+
+#remove Mitochondria/ chloroplast
+phy <- phy %>% subset_taxa( Family!= "Mitochondria" | is.na(Family) & Class!="Chloroplast" | is.na(Class) ) 
+
+#remove NTC and a sample with 20 total reads 
+#phy <-phy %>% subset_samples(Species!="NA")
+phy <-phy %>% subset_samples(Bag_Number!="32")
+
+## Basic summary information for the phyloseq object that you just created
+#number of taxa
+ntaxa(phy)
+#number of samples
+nsamples(phy)
+#number of variables
+sample_variables(phy)
+
+```
+
+```{R}
+
+#filter out the noise in the data, this filters out any taxa that have counts less than 0
+phy_fill= filter_taxa(phy , function(x) sum(x > 2) > (0.03*length(x)), TRUE)
+## Basic summary information for the phyloseq object that you just created
+#number of taxa
+ntaxa(phy_fill)
+#number of samples
+nsamples(phy_fill)
+
+```
+
+
+```{R}
+
+df_ra   <- phy_fill %>%
+  tax_glom(taxrank = "Genus") %>%
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt()
+
+```
+```{R}
+#finding the relative abundace of spiro 
+
+df  <- phy_fill %>%
+  tax_glom(taxrank = "Genus") %>%
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt()
+
+
+phy_spiro_yes <- subset(df,structural_zero_spiro == "SP" )
+
+phy_spiro_no <-  subset(df, structural_zero_spiro == "SNP")
+
+
+
+#SP
+Spiro_yes_abundance <- subset(phy_spiro_yes, OTU == c("3aa965194c47dee2ebb9ad04c942930a", "7cf1379d940287bd940fa3da47d76c09"))
+
+
+spiro_mean_yes <- mean(Spiro_yes_abundance$Abundance)
+spiro_sd_yes <-sd(Spiro_yes_abundance$Abundance)
+
+s_yes_t1 <- subset(Spiro_yes_abundance, Time_Point == "T1")
+s_yes_t1_mean <- mean(s_yes_t1$Abundance)
+s_yes_t1_SD <- sd(s_yes_t1$Abundance)
+
+s_yes_t2 <- subset(Spiro_yes_abundance, Time_Point == "T2")
+s_yes_t2_mean <- mean(s_yes_t2$Abundance)
+s_yes_t2_SD <- sd(s_yes_t2$Abundance)
+
+
+#SNP
+Spiro_no_abundance <- phy_spiro_no %>% filter(OTU==c("3aa965194c47dee2ebb9ad04c942930a", "7cf1379d940287bd940fa3da47d76c09"))
+
+spiro_mean_no <- mean(Spiro_no_abundance$Abundance)
+spiro_sd_no <-sd(Spiro_no_abundance$Abundance)
+
+s_no_t1 <- subset(Spiro_no_abundance, Time_Point == "T1")
+s_no_t1_mean <- mean(s_no_t1$Abundance)
+s_no_t1_SD <- sd(s_no_t1$Abundance)
+
+s_no_t2 <- subset(Spiro_no_abundance, Time_Point == "T2")
+s_no_t2_mean <- mean(s_no_t2$Abundance)
+s_no_t2_SD <- sd(s_no_t2$Abundance)
+
+```
+
+```{R}
+
+supp.labs <- c("Baseline Conditions", "Elevated Temperature")
+names(supp.labs) <- c("T1", "T2")
+
+supp.labs2 <- c( "Non-Spiro Present Genotypes (SNP)", "Spiro Present Genotypes (SP)")
+names(supp.labs2) <- c("No", "Yes")
+
+
+df_ra %>%
+  filter(Abundance >0.005) %>%
+filter(Family!=" f__Fokiniaceae") %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "o__", ""))) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "f__", ""))) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "c__", ""))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "k__", ""))) %>%
+   mutate(across(where(is.character), ~ str_replace_all(.x, "_unclassified", " unclassified"))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "JGI_0000069-P22", "Candidatus Gracilibacteria"))) %>%
+
+  ggplot(aes(x =a_Genotype, y=Abundance, fill=Family)) + 
+  geom_bar(stat="identity", position="fill", aes(fill = Family)) + 
+  facet_grid(Time_Point~structural_zero_spiro, scales = "free",
+             labeller = labeller(Time_Point = supp.labs, structural_zero_spiro = supp.labs2 ))+
+  
+  scale_fill_manual(values=c( "#56B4E9","#CBD588", "orange","#DA5724","#CD9BCD",
+    "gray80", "#AD6F3B", "green","#D14285", "#652926","#8569D5", 
+    "#5E738F","#D1A33D", "#8A7C64","lightsalmon","aquamarine4",
+    "lightblue4", "lightpink", "ivory4","royalblue4", "darkorchid", 
+    "palevioletred1", "#56B4E9","#CBD588","yellow2","#5F7FC7", "orange","#DA5724",
+    "#CD9BCD", "gray80",
+    "#AD6F3B" )) +
+  theme_classic2()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=9),
+        strip.text.x = element_text(size = 10, face = "bold"),
+        strip.text.y = element_text(size = 10, face = "bold"),
+        axis.text = element_text(size=9),
+        axis.title= element_text(size = 14),
+        legend.title = element_text(size = 14)) +
+  
+  
+  labs(
+    x = "Genotypes",
+    y = "Abundance",
+  fill = "Taxa")
+
+ggsave("relativeAbundance_spiro.png", width = 10, height = 10.5)
+
+```
+This plot is with Rickettsiales included 
+
+```{r}
+df_ra %>%
+  filter(Abundance >0.005) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "o__", ""))) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "f__", ""))) %>%
+mutate(across(where(is.character), ~ str_replace_all(.x, "c__", ""))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "k__", ""))) %>%
+   mutate(across(where(is.character), ~ str_replace_all(.x, "_unclassified", " unclassified"))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "JGI_0000069-P22", "Candidatus Gracilibacteria"))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(.x, "Fokiniaceae", "Midichloriaceae")))%>%
+
+  ggplot(aes(x =a_Genotype, y=Abundance, fill=Family)) + 
+  geom_bar(stat="identity", position="fill", aes(fill = Family)) + 
+  facet_grid(Time_Point~structural_zero_spiro, scales = "free",
+             labeller = labeller(Time_Point = supp.labs, structural_zero_spiro = supp.labs2 ))+
+  
+  scale_fill_manual(values=c( "#56B4E9","#CBD588", "orange","#DA5724","aquamarine4" ,"#CD9BCD",
+    "gray80", "#AD6F3B", "green","#D14285", "#652926","#8569D5", 
+    "#5E738F","#D1A33D", "#8A7C64","lightsalmon","aquamarine4",
+    "lightblue4", "lightpink", "ivory4","royalblue4", "darkorchid", 
+    "palevioletred1", "#56B4E9","#CBD588","yellow2","#5F7FC7", "orange","#DA5724",
+    "#CD9BCD", "gray80",
+    "#AD6F3B" )) +
+  theme_classic2()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=9),
+        strip.text.x = element_text(size = 10, face = "bold"),
+        strip.text.y = element_text(size = 10, face = "bold"),
+        axis.text = element_text(size=9),
+        axis.title= element_text(size = 14),
+        legend.title = element_text(size = 14)) +
+  
+  
+  labs(
+    x = "Genotypes",
+    y = "Abundance",
+  fill = "Taxa")
+
+ggsave("relativeAbundance_spiro_withRICA.png", width = 10, height = 10.5)
+```
+
+
+all finished 
